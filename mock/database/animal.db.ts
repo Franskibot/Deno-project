@@ -1,5 +1,5 @@
 // filepath: /c:/Users/frata/Desktop/Deno-project/mock/database/animal.db.ts
-import { DB } from "https://deno.land/x/sqlite/mod.ts";
+import { DB } from "https://deno.land/x/sqlite@v3.9.1/mod.ts";
 
 export const create_animal_table_command = `
 CREATE TABLE IF NOT EXISTS pets(

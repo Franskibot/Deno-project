@@ -1,5 +1,4 @@
-// filepath: /c:/Users/frata/Desktop/Deno-project/mock/generateMockDatabase.ts
-import { DB } from "https://deno.land/x/sqlite/mod.ts";
+import { DB } from "https://deno.land/x/sqlite@v3.9.1/mod.ts";
 import { factoryPeople, factoryAnimals } from "./factory.ts";
 import { create_people_table_command } from "./database/personal-details.db.ts";
 import { create_animal_table_command } from "./database/animal.db.ts";

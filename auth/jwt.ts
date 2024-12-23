@@ -1,7 +1,12 @@
-// filepath: /c:/Users/frata/Desktop/Deno-project/auth/jwt.ts
 import { create, verify, getNumericDate } from "@zaubrik/djwt";
+import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts";
 
-const jwtSecret = "your_secret_key_here"; // Imposta la chiave direttamente nel codice
+const env = config();
+const jwtSecret = env.JWT_SECRET;
+
+if (!jwtSecret) {
+  throw new Error("JWT_SECRET is not defined in the environment variables");
+}
 
 const key = await crypto.subtle.importKey(
   "raw",
