@@ -1,29 +1,34 @@
 import { Hono } from "https://deno.land/x/hono@v3.0.0/mod.ts";
 import { generateJwt, verifyJwt } from "./auth/jwt.ts";
-import { argon2Hasher, argon2Verify } from "./auth/pwd.ts";
-import { personalDetailsDb } from "./mock/database/mod.ts"; // Assicurati che il percorso sia corretto
+import { bcryptHasher, bcryptVerify } from "./auth/pwd.ts";
+import { personalDetailsDb } from "./mock/database/mod.ts";
+import type { Context } from "https://deno.land/x/hono@v3.0.0/mod.ts";
 
 const app = new Hono();
 
+// Rotta per la root
+app.get('/', (c: Context) => {
+    return c.json({ message: "Welcome to the API!" });
+});
+
 // Rotta per la registrazione
-app.post('/register', async (c) => {
+app.post('/register', async (c: Context) => {
     const { firstName, lastName, email, password } = await c.req.json();
 
-    // Genera un sale casuale per la password
-    const salt = crypto.getRandomValues(new Uint8Array(32));
-    const hashedPassword = await argon2Hasher(password, new TextDecoder().decode(salt));
+    // Genera un hash per la password
+    const hashedPassword = await bcryptHasher(password);
 
     // Inserisci i dettagli dell'utente nel database
     await personalDetailsDb.query(
-        "INSERT INTO people (firstName, lastName, email, password, salt) VALUES (?, ?, ?, ?, ?);",
-        [firstName, lastName, email, hashedPassword, new TextDecoder().decode(salt)]
+        "INSERT INTO people (firstName, lastName, email, password) VALUES (?, ?, ?, ?);",
+        [firstName, lastName, email, hashedPassword]
     );
 
     return c.json({ message: "User registered successfully!" }, 201);
 });
 
 // Rotta per il login
-app.post('/login', async (c) => {
+app.post('/login', async (c: Context) => {
     const { email, password } = await c.req.json();
 
     // Recupera l'utente dal database
@@ -38,22 +43,21 @@ app.post('/login', async (c) => {
         lastName: string;
         email: string;
         password: string;
-        salt: string;
     }
 
     const user = result[0] as unknown as User;
 
-    if (!user || !await argon2Verify(password, user.salt, user.password)) {
+    if (!user || !await bcryptVerify(password, user.password)) {
         return c.json({ message: "Invalid credentials" }, 401);
     }
 
     // Genera un JWT per l'utente
-    const jwt = await generateJwt({ id: user.id.toString(), firstName: user.firstName, lastName: user.lastName, email: user.email }, c.req.url);
+    const jwt = await generateJwt({ id: user.id.toString(), firstName: user.firstName, lastName: user.lastName, email: user.email });
     return c.json({ jwt });
 });
 
 // Rotta per ottenere i dettagli dell'utente autenticato
-app.get('/me', async (c) => {
+app.get('/me', async (c: Context) => {
     const authHeader = c.req.headers.get('Authorization');
     
     if (!authHeader) {

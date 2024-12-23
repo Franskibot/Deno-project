@@ -1,6 +1,5 @@
+// filepath: /c:/Users/frata/Desktop/Deno-project/mock/database/personal-details.db.ts
 import { DB } from "https://deno.land/x/sqlite/mod.ts";
-
-const personalDetailsDb = new DB("./mock/database/people.db");
 
 export const create_people_table_command = `
 CREATE TABLE IF NOT EXISTS people(
@@ -12,5 +11,8 @@ CREATE TABLE IF NOT EXISTS people(
     salt TEXT NOT NULL
 );
 `;
+
+const personalDetailsDb = new DB("./mock/database/personalDetails.db");
+personalDetailsDb.execute(create_people_table_command);
 
 export default personalDetailsDb;
