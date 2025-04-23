@@ -1,0 +1,823 @@
+//@version=6
+indicator("Smart Trading Advisor", overlay=true, max_labels_count=500)
+
+// ===== PARAMETRI PERSONALIZZABILI =====
+// Gruppi di parametri per organizzazione migliore
+rsiLength = input.int(14, "Periodo RSI", group="Indicatori")
+emaLength = input.int(9, "Periodo EMA", group="Indicatori")
+emaLongLength = input.int(50, "Periodo EMA Lungo", group="Indicatori")
+volumeThresh = input.float(1.2, "Soglia Volume (multiplo media)", group="Volume")
+resistanceSensitivity = input.int(20, "Sensibilità S/R", group="Livelli")
+pivotLookback = input.int(7, "Periodi per Pivot Points", group="Livelli")
+showRiskInfo = input.bool(true, "Mostra Livelli Risk/Reward", group="Gestione Rischio")
+atrPeriod = input.int(14, "Periodo ATR", group="Volatilità")
+atrMultiplier = input.float(1.5, "Moltiplicatore ATR per Stop", group="Gestione Rischio")
+riskRewardRatio = input.float(2.0, "Rapporto Risk/Reward", minval=1.0, group="Gestione Rischio")
+higherTFFilter = input.bool(true, "Filtro Timeframe Superiore", group="Filtri Avanzati")
+higherTimeframe = input.timeframe("D", "Timeframe Superiore", group="Filtri Avanzati")
+
+// Parametri volatilità oro specifici
+goldATRMultiplier = input.float(2.0, "ATR Multiplier per Oro", group="XAUUSD")
+volatilityAdaptive = input.bool(true, "Stops adattivi alla volatilità", group="XAUUSD")
+
+// Identificazione zone di liquidità
+useOrderBlocks = input.bool(true, "Mostra zone di liquidità", group="XAUUSD")
+obLength = input.int(10, "Lunghezza Order Blocks", minval=5, group="XAUUSD")
+obThreshold = input.float(1.5, "Soglia Order Blocks (x ATR)", minval=1.0, group="XAUUSD")
+
+// Filtro per sessione di trading
+useSessionFilter = input.bool(false, "Filtro per sessione", group="XAUUSD")
+preferredSession = input.string("London/NY", "Sessione preferita", 
+                              options=["Asian", "London", "NY", "London/NY"], group="XAUUSD")
+
+// Rilevamento imbalance nel prezzo
+findImbalance = input.bool(true, "Rileva imbalance", group="Smart Money")
+imbalanceThreshold = input.float(0.3, "Soglia imbalance (%)", minval=0.1, maxval=1.0, step=0.1, group="Smart Money")
+
+// Gestione posizione avanzata per oro
+usePyramiding = input.bool(false, "Suggerisci pyramiding", group="Gestione Rischio")
+useTrailingStop = input.bool(true, "Usa trailing stop", group="Gestione Rischio")
+trailPercent = input.float(50, "Percentuale trailing (%)", minval=20, maxval=80, group="Gestione Rischio")
+breakEvenAfterR = input.float(1.0, "Break-even dopo R multiplo", minval=0.5, group="Gestione Rischio")
+
+// Aggiungi nei parametri
+useMarketStructure = input.bool(true, "Analisi struttura mercato", group="Structure")
+msLength = input.int(10, "Lookback Market Structure", minval=5, group="Structure")
+
+// Aggiungi nei parametri
+useCOTData = input.bool(true, "Sentiment COT Report", group="Sentiment")
+
+// Aggiungi nei parametri
+useAutoTrendlines = input.bool(true, "Trendline automatiche", group="Trendlines")
+trendlineLength = input.int(50, "Lookback trendline", minval=20, group="Trendlines")
+
+// Aggiungi nei parametri
+useADX = input.bool(true, "Filtro ADX", group="Direzionalità")
+adxThreshold = input.int(25, "Soglia ADX", minval=15, maxval=40, group="Direzionalità")
+adxLength = input.int(14, "Lunghezza ADX", minval=7, group="Direzionalità")
+
+// Aggiungi nei parametri
+useVolumeProfile = input.bool(true, "Volume Profile", group="Volume Avanzato")
+vpLength = input.int(100, "Lunghezza Volume Profile", minval=20, group="Volume Avanzato")
+vpDivisions = input.int(12, "Divisioni VP", minval=5, maxval=20, group="Volume Avanzato")
+
+// Aggiungi nei parametri
+usePredictiveScore = input.bool(true, "Sistema predittivo", group="Predizione")
+
+// Aggiungi nei parametri 
+useSqueezeDetection = input.bool(true, "Rilevamento Squeeze", group="Squeeze")
+bollingerLength = input.int(20, "Periodo Bollinger", minval=10, group="Squeeze")
+bollingerMult = input.float(2.0, "Multiplier Bollinger", minval=1.5, maxval=3.0, group="Squeeze")
+keltnerLength = input.int(20, "Periodo Keltner", minval=10, group="Squeeze")
+keltnerMult = input.float(1.5, "Multiplier Keltner", minval=1.0, maxval=3.0, group="Squeeze")
+
+// Aggiungi nei parametri
+useMoneyFlow = input.bool(true, "Money Flow Index", group="Smart Money")
+mfiLength = input.int(14, "Periodo MFI", minval=7, maxval=30, group="Smart Money")
+mfiOverbought = input.int(80, "MFI Ipercomprato", minval=70, maxval=90, group="Smart Money")
+mfiOversold = input.int(20, "MFI Ipervenduto", minval=10, maxval=30, group="Smart Money")
+
+// Aggiungi nei parametri
+useCandlePatterns = input.bool(true, "Pattern candele avanzati", group="Candlestick")
+
+// ===== INDICATORI DI BASE =====
+ema = ta.ema(close, emaLength)
+emaLong = ta.ema(close, emaLongLength)
+rsi = ta.rsi(close, rsiLength)
+avgVolume = ta.sma(volume, 20)
+atr = ta.atr(atrPeriod)
+
+// Calcola Money Flow Index - CORRETTO
+mfi = ta.mfi(hlc3, mfiLength)  // Rimuovi il parametro volume, è implicito
+
+// Calcola ADX
+[diPlus, diMinus, adxValue] = ta.dmi(adxLength, 1)
+
+// Definisci condizioni ADX - Aggiungi prima dell'uso in riga 304
+strongTrendADX = adxValue > adxThreshold
+bullishADX = diPlus > diMinus
+bearishADX = diMinus > diPlus
+
+// ===== RILEVAMENTO TREND =====
+trendUp = ema > emaLong and close > ema
+trendDown = ema < emaLong and close < ema
+sidewaysMarket = not trendUp and not trendDown
+trendStrength = math.abs(ema - emaLong) / emaLong * 100
+strongTrend = trendStrength > 2.0
+
+// ===== ANALISI TIMEFRAME SUPERIORE =====
+// Ottieni direzione trend dal timeframe superiore
+higherEMA9 = request.security(syminfo.tickerid, higherTimeframe, ta.ema(close, emaLength))
+higherEMA50 = request.security(syminfo.tickerid, higherTimeframe, ta.ema(close, emaLongLength))
+higherRSI = request.security(syminfo.tickerid, higherTimeframe, ta.rsi(close, rsiLength))
+higherTrendUp = higherEMA9 > higherEMA50 and higherRSI > 50
+higherTrendDown = higherEMA9 < higherEMA50 and higherRSI < 50
+
+// ===== RILEVAMENTO PRICE ACTION =====
+// Candele Engulfing migliorato
+bullishEngulf = close > open and close[1] < open[1] and close > open[1] and open < close[1]
+bearishEngulf = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+
+// Dimensione candela rispetto ATR (evitare modelli troppo piccoli)
+significantCandle = math.abs(close - open) > atr * 0.5
+
+// Doji
+doji = math.abs(open - close) <= (high - low)*0.1
+
+// Detector pattern avanzati
+// Morning/Evening Star
+morningStar = close[2] < open[2] and 
+              math.abs(close[1] - open[1]) < math.abs(close[2] - open[2]) * 0.3 and
+              close > open and 
+              close > (open[2] + close[2]) / 2
+
+eveningStar = close[2] > open[2] and 
+              math.abs(close[1] - open[1]) < math.abs(close[2] - open[2]) * 0.3 and
+              close < open and 
+              close < (open[2] + close[2]) / 2
+
+// Hammer/Shooting Star
+hammerPattern = (high - math.max(close, open)) < 0.2 * (high - low) and 
+               (math.min(close, open) - low) > 0.6 * (high - low) and
+               close > open
+
+shootingStar = (high - math.max(close, open)) > 0.6 * (high - low) and 
+              (math.min(close, open) - low) < 0.2 * (high - low) and
+              close < open
+
+// Piercing/Dark Cloud
+piercingPattern = close[1] < open[1] and 
+                 close > open and 
+                 close > open[1] + (close[1] - open[1]) * 0.5 and
+                 close < open[1]
+
+darkCloud = close[1] > open[1] and 
+           close < open and 
+           close < close[1] - (close[1] - open[1]) * 0.5 and
+           close > open[1]
+
+// ===== SUPPORTI/RESISTENZE DINAMICI =====
+// Pivot avanzati
+pivotHighLevel = ta.pivothigh(high, pivotLookback, pivotLookback)
+pivotLowLevel = ta.pivotlow(low, pivotLookback, pivotLookback)
+
+// Memorizza i livelli significativi
+var float[] resistanceLevels = array.new_float(5, na)
+var float[] supportLevels = array.new_float(5, na)
+
+// Aggiorna i livelli di resistenza
+if not na(pivotHighLevel)
+    // Verifica se il livello è già nell'array (evita duplicati)
+    newLevel = true
+    for i = 0 to 4
+        if not na(array.get(resistanceLevels, i)) and math.abs(array.get(resistanceLevels, i) - pivotHighLevel) / pivotHighLevel * 100 < 0.5
+            newLevel := false
+            break
+    
+    if newLevel
+        array.shift(resistanceLevels)
+        array.push(resistanceLevels, pivotHighLevel)
+
+// Aggiorna i livelli di supporto
+if not na(pivotLowLevel)
+    // Verifica se il livello è già nell'array (evita duplicati)
+    newLevel = true
+    for i = 0 to 4
+        if not na(array.get(supportLevels, i)) and math.abs(array.get(supportLevels, i) - pivotLowLevel) / pivotLowLevel * 100 < 0.5
+            newLevel := false
+            break
+    
+    if newLevel
+        array.shift(supportLevels)
+        array.push(supportLevels, pivotLowLevel)
+
+// Trova i livelli più vicini al prezzo attuale
+resistance = ta.highest(high, resistanceSensitivity)
+support = ta.lowest(low, resistanceSensitivity)
+
+// Calcola distanze e resistenza/supporto più vicini
+var float nearestResistance = na
+var float nearestSupport = na
+var float distanceToRes = 100000.0
+var float distanceToSup = 100000.0
+
+for i = 0 to 4
+    resLevel = array.get(resistanceLevels, i)
+    supLevel = array.get(supportLevels, i)
+    
+    if not na(resLevel) and resLevel > close
+        distToRes = (resLevel - close) / close * 100
+        if distToRes < distanceToRes
+            distanceToRes := distToRes
+            nearestResistance := resLevel
+    
+    if not na(supLevel) and supLevel < close
+        distToSup = (close - supLevel) / close * 100
+        if distToSup < distanceToSup
+            distanceToSup := distToSup
+            nearestSupport := supLevel
+
+// ===== DIVERGENZE E VOLUME =====
+volumeIncreasing = volume > avgVolume * volumeThresh
+rsiBullishDiv = low < low[1] and rsi > rsi[1] and low[1] < low[2] and rsi[1] < rsi[2]
+rsiBearishDiv = high > high[1] and rsi < rsi[1] and high[1] > high[2] and rsi[1] > rsi[2]
+
+// Rileva divergenze
+mfiBullishDiv = low < low[1] and mfi > mfi[1] and mfi[1] < mfiOversold
+mfiBearishDiv = high > high[1] and mfi < mfi[1] and mfi[1] > mfiOverbought
+
+// ===== FILTRI DI VOLATILITÀ =====
+volatility = atr / close * 100
+highVolatility = volatility > 2.0  // 2% ATR rispetto al prezzo
+lowVolatility = volatility < 0.5   // 0.5% ATR rispetto al prezzo
+
+// Calcolo ATR percentuale e confronto con media storica
+atrPercent = atr / close * 100
+atrPercentAvg = ta.sma(atrPercent, 50)
+highGoldVolatility = atrPercent > atrPercentAvg * 1.5
+lowGoldVolatility = atrPercent < atrPercentAvg * 0.5
+
+// Adatta il moltiplicatore ATR in base alla volatilità
+dynamicATRMultiplier = volatilityAdaptive ? (highGoldVolatility ? atrMultiplier * 1.5 : lowGoldVolatility ? atrMultiplier * 0.8 : atrMultiplier) : atrMultiplier
+
+// ===== LOGICA SEGNALI MIGLIORATA =====
+// Buy conditions refined
+buyCondition = (close > resistance and volumeIncreasing and rsi > 50 and not highVolatility) or (bullishEngulf and low <= support and rsi > 30 and significantCandle) or(rsiBullishDiv and close > ema and volumeIncreasing)
+
+// Aggiungi filtro di timeframe superiore se richiesto
+if higherTFFilter
+    buyCondition := buyCondition and (not higherTrendDown)
+
+// Sell conditions refined
+sellCondition = (close < support and volumeIncreasing and rsi < 50 and not highVolatility) or (bearishEngulf and high >= resistance and rsi < 70 and significantCandle) or(rsiBearishDiv and close < ema and volumeIncreasing)
+
+// Aggiungi filtro di timeframe superiore se richiesto
+if higherTFFilter
+    sellCondition := sellCondition and (not higherTrendUp)
+
+// Identifica swing highs e lows importanti (potenziali order blocks)
+swingHigh = ta.highest(high, obLength)
+swingLow = ta.lowest(low, obLength)
+significantMove = high - low > atr * obThreshold
+
+// Verifica se siamo in prossimità di una zona di liquidità
+nearBullishLiquidity = low <= swingLow and low >= swingLow * 0.99 and significantMove
+nearBearishLiquidity = high >= swingHigh and high <= swingHigh * 1.01 and significantMove
+
+// Usa queste zone come filtri aggiuntivi per migliorare i segnali
+if useOrderBlocks
+    buyCondition := buyCondition and (nearBullishLiquidity or close > ema)
+    sellCondition := sellCondition and (nearBearishLiquidity or close < ema)
+
+// Calcola gap tra candele consecutive
+gapUp = low > high[1] + (high[1] - low[1]) * imbalanceThreshold
+gapDown = high < low[1] - (high[1] - low[1]) * imbalanceThreshold
+
+// Utilizzare imbalance come conferma
+if findImbalance
+    buyCondition := buyCondition and (gapUp or close > high[1])
+    sellCondition := sellCondition and (gapDown or close < low[1])
+
+// Analisi dei swing point per Market Structure
+swingHighMS = ta.pivothigh(high, msLength, msLength)
+swingLowMS = ta.pivotlow(low, msLength, msLength)
+
+// Structure breaks
+breakOfStructureUp = not na(swingLowMS) and close > swingHighMS[1]
+breakOfStructureDown = not na(swingHighMS) and close < swingLowMS[1]
+
+// Change of Character (CHoCH)
+higherHighs = not na(swingHighMS) and swingHighMS > swingHighMS[1] and not na(swingHighMS[1])
+higherLows = not na(swingLowMS) and swingLowMS > swingLowMS[1] and not na(swingLowMS[1])
+lowerHighs = not na(swingHighMS) and swingHighMS < swingHighMS[1] and not na(swingHighMS[1])
+lowerLows = not na(swingLowMS) and swingLowMS < swingLowMS[1] and not na(swingLowMS[1])
+
+// Definisci la struttura di mercato
+bullishStructure = higherLows and higherHighs
+bearishStructure = lowerLows and lowerHighs
+
+// Usa come filtro
+if useMarketStructure
+    buyCondition := buyCondition and (bullishStructure or breakOfStructureUp)
+    sellCondition := sellCondition and (bearishStructure or breakOfStructureDown)
+
+// Filtra segnali usando ADX
+if useADX
+    // Permetti solo segnali in trend forti o ignora ADX se sei in zone di supporto/resistenza importanti
+    buyCondition := buyCondition and (strongTrendADX or nearBullishLiquidity)
+    sellCondition := sellCondition and (strongTrendADX or nearBearishLiquidity)
+    
+    // Assicurati che la direzione sia allineata
+    buyCondition := buyCondition and (bullishADX or trendStrength > 3.0)
+    sellCondition := sellCondition and (bearishADX or trendStrength > 3.0)
+
+// Utilizzalo come filtro
+if useMoneyFlow
+    buyCondition := buyCondition and (mfi < 50 or mfiBullishDiv)
+    sellCondition := sellCondition and (mfi > 50 or mfiBearishDiv)
+
+// Utilizzalo come filtro
+if useCandlePatterns
+    buyCondition := buyCondition or (morningStar or hammerPattern or piercingPattern)
+    sellCondition := sellCondition or (eveningStar or shootingStar or darkCloud)
+
+// Aggiungi in una nuova sezione dopo Market Structure
+if useAutoTrendlines and barstate.islast
+    // Prima del blocco if useAutoTrendlines
+    var float currentVal = na
+    var float slope = na
+
+    // Trova punti per trendline ribassista
+    highestBar = 0
+    secondHighBar = 0
+    highestVal = high[0]
+    secondHighVal = 0.0
+    
+    for i = 0 to trendlineLength - 1
+        if high[i] > highestVal
+            secondHighBar := highestBar
+            secondHighVal := highestVal
+            highestBar := i
+            highestVal := high[i]
+        else if high[i] > secondHighVal
+            secondHighBar := i
+            secondHighVal := high[i]
+    
+    // Traccia trendline ribassista se troviamo due massimi
+    if highestBar != secondHighBar and highestBar != 0 and secondHighBar != 0
+        // Assicurati che i punti siano in ordine cronologico
+        firstBar = math.max(highestBar, secondHighBar)
+        secondBar = math.min(highestBar, secondHighBar)
+        firstVal = firstBar == highestBar ? highestVal : secondHighVal
+        secondVal = secondBar == highestBar ? highestVal : secondHighVal
+        
+        // Estendi la linea al presente
+        slope := (secondVal - firstVal) / (secondBar - firstBar)
+        currentVal := secondVal + slope * secondBar
+        
+        // Traccia solo trendline significative
+        if math.abs(slope) > 0.0001
+            bearTrendline = line.new(bar_index - firstBar, firstVal, bar_index, currentVal, color=color.new(color.red, 40), width=2)
+    
+    // Logica simile per trendline rialzista (usando minimi)
+    // ...codice simile per i minimi...
+    
+    // Verifica violazione trendline
+    trendlineBreakUp = close > currentVal and slope < 0
+    trendlineBreakDown = close < currentVal and slope > 0
+    
+    // Aggiungi segnale se c'è una rottura di trendline
+    if trendlineBreakUp
+        buyCondition := true
+    if trendlineBreakDown
+        sellCondition := true
+
+// Calcola valori fuori dal blocco condizionale
+var float highRange = ta.highest(high, vpLength)
+var float lowRange = ta.lowest(low, vpLength)
+
+// Calcola volume profile semplificato
+if useVolumeProfile and barstate.islast
+    // Usa highRange e lowRange invece di calcolarli dentro il blocco
+    priceRange = highRange - lowRange
+    boxSize = priceRange / vpDivisions
+    
+    // Crea array per volumi a ogni livello
+    var volumeLevels = array.new_float(vpDivisions, 0.0)
+    array.fill(volumeLevels, 0.0)
+    
+    // Popola array
+    for i = 0 to vpLength - 1
+        for j = 0 to vpDivisions - 1
+            levelPrice = lowRange + j * boxSize
+            if high[i] >= levelPrice and low[i] <= levelPrice
+                array.set(volumeLevels, j, array.get(volumeLevels, j) + volume[i])
+    
+    // Trova POC (Point of Control)
+    maxVolume = array.max(volumeLevels)
+    maxIndex = 0
+    for i = 0 to vpDivisions - 1
+        if array.get(volumeLevels, i) == maxVolume
+            maxIndex := i
+    
+    pocPrice = lowRange + maxIndex * boxSize
+    
+    // Disegna POC
+    line.new(bar_index - vpLength, pocPrice, bar_index, pocPrice, color=color.new(color.purple, 0), width=3, style=line.style_dashed)
+    label.new(bar_index + 5, pocPrice, "POC", color=color.new(color.purple, 20), textcolor=color.white, style=label.style_label_left)
+    
+    // Valuta vicinanza al POC
+    nearPOC = math.abs(close - pocPrice) / pocPrice * 100 < 0.3
+    
+    // Usa POC come filtro di conferma
+    if nearPOC
+        buyCondition := buyCondition and close > pocPrice
+        sellCondition := sellCondition and close < pocPrice
+
+// Correlazione con DXY 
+dxySymbol = "DXY"
+dxyClose = request.security(dxySymbol, timeframe.period, close)
+dxyEma = request.security(dxySymbol, timeframe.period, ta.ema(close, emaLength))
+dxyTrend = request.security(dxySymbol, timeframe.period, close > ta.ema(close, emaLongLength))
+
+// Filtro dollaro per i segnali
+dxyFilter = input.bool(true, "Filtro DXY", group="Filtri Avanzati")
+goldBullishConfirmation = dxyFilter ? not dxyTrend : true
+goldBearishConfirmation = dxyFilter ? dxyTrend : true
+
+// Applica filtro DXY alle condizioni di trading
+if dxyFilter
+    buyCondition := buyCondition and goldBullishConfirmation
+    sellCondition := sellCondition and goldBearishConfirmation
+
+// Simula i dati COT per l'oro (in un caso reale useresti request.security con un simbolo COT)
+// Questa è una approssimazione basata sulla correlazione tra RSI a lungo termine e posizionamento COT
+goldLongTermRSI = ta.rsi(close, 89)
+cotNetLong = goldLongTermRSI > 65  // Situazione di ipercomprato = commercials net short
+cotNetShort = goldLongTermRSI < 35  // Situazione di ipervenduto = commercials net long
+
+// Implementare come filtro
+if useCOTData
+    // COT in controtendenza: commercials net long = bullish, net short = bearish
+    buyCondition := buyCondition and (not cotNetLong or trendStrength > 3.0)
+    sellCondition := sellCondition and (not cotNetShort or trendStrength > 3.0)
+
+// Determina la sessione attuale
+timeToHours = (hour * 60 + minute) / 60
+isAsianSession = timeToHours >= 0 and timeToHours < 8  // 00:00-08:00 UTC
+isLondonSession = timeToHours >= 8 and timeToHours < 16 // 08:00-16:00 UTC
+isNYSession = timeToHours >= 13 and timeToHours < 21    // 13:00-21:00 UTC
+isLondonNYOverlap = timeToHours >= 13 and timeToHours < 16 // 13:00-16:00 UTC
+
+// Attiva il filtro in base alla sessione scelta
+sessionOK = not useSessionFilter or 
+          (preferredSession == "Asian" and isAsianSession) or
+          (preferredSession == "London" and isLondonSession) or
+          (preferredSession == "NY" and isNYSession) or
+          (preferredSession == "London/NY" and isLondonNYOverlap)
+
+// Applica il filtro alle condizioni di trading
+buyCondition := buyCondition and sessionOK
+sellCondition := sellCondition and sessionOK
+
+// ===== CALCOLO LIVELLI RISK MANAGEMENT =====
+// Calcola stop loss e take profit suggeriti
+float buyStopLoss = na
+float buyTakeProfit = na
+float sellStopLoss = na
+float sellTakeProfit = na
+
+if buyCondition
+    buyStopLoss := math.min(low, low[1]) - atr * dynamicATRMultiplier
+    riskAmount = close - buyStopLoss
+    buyTakeProfit := close + riskAmount * riskRewardRatio
+
+if sellCondition
+    sellStopLoss := math.max(high, high[1]) + atr * dynamicATRMultiplier
+    riskAmount = sellStopLoss - close
+    sellTakeProfit := close - riskAmount * riskRewardRatio
+
+// Calcolo trailing stop
+var float trailingStopLevel = na
+
+if buyCondition
+    trailingStopLevel := buyStopLoss  // Inizializza al livello di stop loss
+    
+    // Calcola il movimento favorevole in termini di R
+    riskAmount = close - buyStopLoss
+    favorableMove = high - close
+    rMultiple = favorableMove / riskAmount
+    
+    // Break-even quando il movimento supera breakEvenAfterR
+    if rMultiple >= breakEvenAfterR and useTrailingStop
+        newStop = math.max(close, buyStopLoss + (high - close) * trailPercent/100)
+        trailingStopLevel := math.max(trailingStopLevel, newStop)
+
+// Calcola Squeeze
+// Dichiara variabili a livello globale
+var bool sqzOn = false
+var bool sqzOff = false
+var bool sqzRelease = false
+
+if useSqueezeDetection
+    // Bollinger Bands
+    basis = ta.sma(close, bollingerLength)
+    dev = ta.stdev(close, bollingerLength)
+    upperBB = basis + bollingerMult * dev
+    lowerBB = basis - bollingerMult * dev
+    
+    // Keltner Channels
+    ma = ta.ema(close, keltnerLength)
+    range_ma = ta.ema(high - low, keltnerLength)
+    upperKC = ma + range_ma * keltnerMult
+    lowerKC = ma - range_ma * keltnerMult
+    
+    // Squeeze e rilascio
+    sqzOn := lowerBB > lowerKC and upperBB < upperKC
+    sqzOff := lowerBB < lowerKC or upperBB > upperKC
+    sqzRelease := sqzOn[1] and sqzOff
+
+    // Momenti di rilascio squeeze
+    sqzRelease := sqzOn[1] and sqzOff
+
+    // Utilizzo come filtro
+    if sqzRelease
+        buyCondition := buyCondition or (close > open and close > ma)
+        sellCondition := sellCondition or (close < open and close < ma)
+
+// Aggiungi in una nuova sezione dopo il calcolo di segnali
+// Valuta la predittività della configurazione attuale
+predictiveScore = 0.0
+predictionConfidence = ""
+
+if usePredictiveScore
+    // Valuta combinazione di parametri chiave per prevedere successo
+    // 1. Trend sulla direzione allineato su timeframe multipli
+    if buyCondition
+        if trendUp and higherTrendUp
+            predictiveScore := predictiveScore + 30
+        else if trendUp and not higherTrendUp
+            predictiveScore := predictiveScore + 15
+        else if not trendUp and higherTrendUp
+            predictiveScore := predictiveScore + 10
+    
+    if sellCondition
+        if trendDown and higherTrendDown
+            predictiveScore := predictiveScore + 30
+        else if trendDown and not higherTrendDown
+            predictiveScore := predictiveScore + 15
+        else if not trendDown and higherTrendDown
+            predictiveScore := predictiveScore + 10
+    
+    // 2. Pattern di prezzo + conferma volume
+    if (bullishEngulf or rsiBullishDiv) and volumeIncreasing
+        predictiveScore := predictiveScore + 20
+    if (bearishEngulf or rsiBearishDiv) and volumeIncreasing
+        predictiveScore := predictiveScore + 20
+    
+    // 3. Contesto DXY
+    if buyCondition and goldBullishConfirmation
+        predictiveScore := predictiveScore + 15
+    if sellCondition and goldBearishConfirmation
+        predictiveScore := predictiveScore + 15
+    
+    // 4. Market structure
+    if buyCondition and (bullishStructure or breakOfStructureUp)
+        predictiveScore := predictiveScore + 15
+    if sellCondition and (bearishStructure or breakOfStructureDown)
+        predictiveScore := predictiveScore + 15
+    
+    // 5. Vicinanza a livelli key
+    if nearBullishLiquidity or nearBearishLiquidity
+        predictiveScore := predictiveScore + 10
+    
+    // Normalizza a 100
+    predictiveScore := math.min(100, predictiveScore)
+    
+    // Determina confidenza
+    if predictiveScore >= 85
+        predictionConfidence := "PREDIZIONE: PROBABILITÀ MOLTO ALTA ★★★★★"
+    else if predictiveScore >= 70
+        predictionConfidence := "PREDIZIONE: PROBABILITÀ ALTA ★★★★☆"
+    else if predictiveScore >= 55
+        predictionConfidence := "PREDIZIONE: PROBABILITÀ MEDIA ★★★☆☆"
+    else if predictiveScore >= 40
+        predictionConfidence := "PREDIZIONE: PROBABILITÀ BASSA ★★☆☆☆"
+    else
+        predictionConfidence := "PREDIZIONE: PROBABILITÀ MOLTO BASSA ★☆☆☆☆"
+
+// ===== PANNELLO CONSIGLI DI TRADING =====
+var table advisorPanel = table.new(position.top_right, 5, 10, color.new(color.black, 70), border_width=1)
+
+// Determina il consiglio di trading
+tradingAdvice = ""
+advisoryColor = color.gray
+
+if trendUp and buyCondition
+    tradingAdvice := "STRONG BUY - Trend rialzista confermato"
+    advisoryColor := color.green
+else if trendDown and sellCondition
+    tradingAdvice := "STRONG SELL - Trend ribassista confermato"
+    advisoryColor := color.red
+else if trendUp and sellCondition
+    tradingAdvice := "SELL - Possibile inversione del trend rialzista"
+    advisoryColor := color.orange
+else if trendDown and buyCondition
+    tradingAdvice := "BUY - Possibile inversione del trend ribassista"
+    advisoryColor := color.lime
+else if trendUp
+    tradingAdvice := "HOLD LONG - Mantieni posizioni rialziste"
+    advisoryColor := color.green
+else if trendDown
+    tradingAdvice := "HOLD SHORT - Mantieni posizioni ribassiste"
+    advisoryColor := color.red
+else if sidewaysMarket
+    tradingAdvice := "NEUTRAL - Mercato laterale, cautela"
+    advisoryColor := color.gray
+
+// Ottieni contesto di mercato
+marketContext = ""
+if highVolatility
+    marketContext := "ALTA VOLATILITÀ - Ridurre size"
+else if lowVolatility
+    marketContext := "BASSA VOLATILITÀ - Possibile esplosione imminente"
+else
+    marketContext := "VOLATILITÀ NORMALE"
+
+if volumeIncreasing
+    marketContext := marketContext + " | VOLUME ELEVATO"
+
+// Avviso notizie ad alto impatto (dovrai aggiornare manualmente le date)
+importantDates = array.new_int(0)
+array.push(importantDates, timestamp("2025-04-26T12:30:00")) // Esempio data NFP
+array.push(importantDates, timestamp("2025-05-04T18:00:00")) // Esempio data FOMC
+
+// Controlla se siamo vicini a un evento importante (24h prima/dopo)
+isNearImportantEvent = false
+timeWindow = 1000 * 60 * 60 * 24 // 24 ore in millisecondi
+
+if barstate.islast
+    for i = 0 to array.size(importantDates) - 1
+        eventDate = array.get(importantDates, i)
+        if math.abs(timenow - eventDate) < timeWindow
+            isNearImportantEvent := true
+            break
+
+// Aggiorna il pannello ogni barra
+if barstate.islast
+    table.clear(advisorPanel, 0, 0, 4, 4)
+    
+    // Titolo
+    table.cell(advisorPanel, 0, 0, "SMART TRADING ADVISOR", bgcolor=color.new(color.blue, 90), text_color=color.white, text_size=size.normal, width=20)
+    
+    // Consiglio principale
+    table.cell(advisorPanel, 0, 1, tradingAdvice, bgcolor=color.new(advisoryColor, 90), text_color=color.white, text_size=size.normal)
+    
+    // Contesto di mercato
+    table.cell(advisorPanel, 0, 2, "CONTESTO: " + marketContext, bgcolor=color.new(color.gray, 90), text_color=color.white, text_size=size.small)
+    
+    // Trend Timeframe Superiore
+    if higherTFFilter
+        htfText = higherTrendUp ? "TF SUPERIORE: RIALZISTA" : higherTrendDown ? "TF SUPERIORE: RIBASSISTA" : "TF SUPERIORE: NEUTRALE"
+        htfColor = higherTrendUp ? color.green : higherTrendDown ? color.red : color.gray
+        table.cell(advisorPanel, 0, 3, htfText, bgcolor=color.new(htfColor, 90), text_color=color.white, text_size=size.small)
+    
+    // Supporto/Resistenza e Risk Management
+    if buyCondition and showRiskInfo and not na(buyStopLoss) and not na(buyTakeProfit)
+        table.cell(advisorPanel, 0, 4, "LONG: Entry " + str.tostring(close, "#.##") + 
+                  " SL " + str.tostring(buyStopLoss, "#.##") + 
+                  " TP " + str.tostring(buyTakeProfit, "#.##"), 
+                  bgcolor=color.new(color.green, 90), text_color=color.white, text_size=size.small)
+    
+    if sellCondition and showRiskInfo and not na(sellStopLoss) and not na(sellTakeProfit)
+        table.cell(advisorPanel, 0, 4, "SHORT: Entry " + str.tostring(close, "#.##") + 
+                  " SL " + str.tostring(sellStopLoss, "#.##") + 
+                  " TP " + str.tostring(sellTakeProfit, "#.##"), 
+                  bgcolor=color.new(color.red, 90), text_color=color.white, text_size=size.small)
+
+    // Avviso evento importante
+    if isNearImportantEvent
+        table.cell(advisorPanel, 0, 5, "⚠️ ATTENZIONE: Evento ad alto impatto imminente ⚠️", 
+                  bgcolor=color.new(color.orange, 70), text_color=color.white)
+
+    // Aggiungi contesto Gold
+    goldContext = "XAUUSD: "
+    goldContext += dxyFilter and not dxyTrend ? "DXY Favorevole ✓ | " : dxyFilter ? "DXY Sfavorevole ✗ | " : ""
+    goldContext += useSessionFilter and sessionOK ? "Sessione Ottimale ✓ | " : useSessionFilter ? "Sessione Non Ottimale ✗ | " : ""
+    goldContext += volatilityAdaptive and highGoldVolatility ? "ALTA VOLATILITÀ ORO ⚠️" : 
+                  volatilityAdaptive and lowGoldVolatility ? "BASSA VOLATILITÀ ORO" : "VOLATILITÀ NORMALE"
+    
+    table.cell(advisorPanel, 0, 6, goldContext, 
+              bgcolor=color.new(color.yellow, 90), text_color=color.black, text_size=size.small)
+
+    // Aggiungi dati COT
+    if useCOTData
+        cotText = cotNetLong ? "COT: Commercials NET SHORT ⚠️" : 
+                 cotNetShort ? "COT: Commercials NET LONG ✓" : 
+                 "COT: Commercials NEUTRAL"
+        cotColor = cotNetLong ? color.orange : cotNetShort ? color.green : color.gray
+        table.cell(advisorPanel, 1, 8, cotText, bgcolor=color.new(cotColor, 70), text_color=color.white)
+
+    // Aggiungi ADX
+    if useADX
+        adxText = strongTrendADX ? "ADX: TREND FORTE (" + str.tostring(math.round(adxValue)) + ")" : 
+                 "ADX: TREND DEBOLE (" + str.tostring(math.round(adxValue)) + ")"
+        adxDirText = bullishADX ? " RIALZISTA" : bearishADX ? " RIBASSISTA" : " NEUTRALE"
+        adxColor = strongTrendADX ? (bullishADX ? color.green : bearishADX ? color.red : color.gray) : color.gray
+        
+        table.cell(advisorPanel, 1, 2, adxText + adxDirText, 
+                  bgcolor=color.new(adxColor, 70), text_color=color.white)
+
+    // Aggiungi predizione
+    if usePredictiveScore and (buyCondition or sellCondition)
+        predColor = predictiveScore >= 70 ? color.green : 
+                   predictiveScore >= 55 ? color.lime : 
+                   predictiveScore >= 40 ? color.yellow : 
+                   color.red
+        
+        table.cell(advisorPanel, 1, 0, predictionConfidence, 
+                  bgcolor=color.new(predColor, 70), text_color=color.white)
+        table.cell(advisorPanel, 1, 1, "Score: " + str.tostring(math.round(predictiveScore)) + "/100", 
+                  bgcolor=color.new(predColor, 70), text_color=color.white)
+
+    // Aggiungi squeeze
+    if useSqueezeDetection
+        squeezeText = sqzOn ? "SQUEEZE: Compressione in corso ⚠️" : 
+                     sqzRelease ? "SQUEEZE: Rilascio esplosivo! 🚀" : 
+                     "SQUEEZE: Nessuna compressione"
+        squeezeColor = sqzOn ? color.yellow : sqzRelease ? color.lime : color.gray
+        
+        table.cell(advisorPanel, 1, 5, squeezeText, 
+                  bgcolor=color.new(squeezeColor, 70), text_color=color.black)
+
+    // Aggiungi Money Flow Index
+    if useMoneyFlow
+        mfiText = mfi > mfiOverbought ? "MONEY FLOW: Ipercomprato (" + str.tostring(math.round(mfi)) + ")" : 
+                 mfi < mfiOversold ? "MONEY FLOW: Ipervenduto (" + str.tostring(math.round(mfi)) + ")" : 
+                 "MONEY FLOW: Neutrale (" + str.tostring(math.round(mfi)) + ")"
+        mfiColor = mfi > mfiOverbought ? color.red : mfi < mfiOversold ? color.green : color.gray
+        
+        table.cell(advisorPanel, 2, 0, mfiText, 
+                  bgcolor=color.new(mfiColor, 70), text_color=color.white)
+
+// ===== VISUALIZZAZIONE GRAFICA =====
+// Plot EMA principale e lungo periodo
+plot(ema, title="EMA 9", color=color.blue, linewidth=2)
+plot(emaLong, title="EMA 50", color=color.yellow, linewidth=1)
+
+// Plot supporto/resistenza
+plot(resistance, title="Resistenza", color=color.new(color.red, 50), style=plot.style_circles, linewidth=1)
+plot(support, title="Supporto", color=color.new(color.green, 50), style=plot.style_circles, linewidth=1)
+
+// Visualizza stop loss e take profit suggeriti - CORRETTO
+plot(showRiskInfo and buyCondition ? buyStopLoss : na, "Buy Stop Loss", color=color.new(color.red, 70), style=plot.style_cross, linewidth=2)
+plot(showRiskInfo and buyCondition ? buyTakeProfit : na, "Buy Take Profit", color=color.new(color.green, 70), style=plot.style_cross, linewidth=2)
+plot(showRiskInfo and sellCondition ? sellStopLoss : na, "Sell Stop Loss", color=color.new(color.red, 70), style=plot.style_cross, linewidth=2)
+plot(showRiskInfo and sellCondition ? sellTakeProfit : na, "Sell Take Profit", color=color.new(color.green, 70), style=plot.style_cross, linewidth=2)
+
+// Visualizza trailing stop
+plot(useTrailingStop and not na(trailingStopLevel) ? trailingStopLevel : na, 
+     title="Trailing Stop", color=color.new(color.purple, 0), style=plot.style_stepline, linewidth=2)
+
+// Visualizzazione dei livelli di supporto e resistenza memorizzati
+for i = 0 to 4
+    resLevel = array.get(resistanceLevels, i)
+    supLevel = array.get(supportLevels, i)
+    
+    if not na(resLevel)
+        line.new(bar_index - 50, resLevel, bar_index, resLevel, color=color.new(color.red, 50), style=line.style_dashed)
+    
+    if not na(supLevel)
+        line.new(bar_index - 50, supLevel, bar_index, supLevel, color=color.new(color.green, 50), style=line.style_dashed)
+
+// Frecce di segnalazione migliorate
+plotshape(buyCondition and trendUp, style=shape.labelup, location=location.belowbar, color=color.green, text="STRONG\nBUY", size=size.small)
+plotshape(buyCondition and not trendUp, style=shape.labelup, location=location.belowbar, color=color.lime, text="BUY", size=size.small)
+plotshape(sellCondition and trendDown, style=shape.labeldown, location=location.abovebar, color=color.red, text="STRONG\nSELL", size=size.small)
+plotshape(sellCondition and not trendDown, style=shape.labeldown, location=location.abovebar, color=color.orange, text="SELL", size=size.small)
+
+// Visualizza zone di liquidità sul grafico
+plotshape(useOrderBlocks and nearBullishLiquidity, style=shape.square, location=location.belowbar, 
+         color=color.new(color.blue, 70), size=size.tiny, text="LIQ")
+plotshape(useOrderBlocks and nearBearishLiquidity, style=shape.square, location=location.abovebar, 
+         color=color.new(color.purple, 70), size=size.tiny, text="LIQ")
+
+// Visualizza imbalance
+plotshape(findImbalance and gapUp, style=shape.diamond, location=location.belowbar, 
+         color=color.new(color.green, 50), size=size.tiny, text="GAP")
+plotshape(findImbalance and gapDown, style=shape.diamond, location=location.abovebar, 
+         color=color.new(color.red, 50), size=size.tiny, text="GAP")
+
+// Visualizzazione
+plotshape(useMarketStructure and breakOfStructureUp, "BOS Up", style=shape.circle, 
+         location=location.belowbar, color=color.new(color.lime, 20), size=size.small)
+plotshape(useMarketStructure and breakOfStructureDown, "BOS Down", style=shape.circle, 
+         location=location.abovebar, color=color.new(color.red, 20), size=size.small)
+
+// Visualizzazione squeeze
+plotshape(useSqueezeDetection and sqzOn, title="Squeeze", style=shape.cross, location=location.bottom, 
+         color=color.new(color.yellow, 0), size=size.tiny)
+plotshape(useSqueezeDetection and sqzRelease, title="Squeeze Release", style=shape.triangleup, location=location.bottom, 
+         color=color.new(color.lime, 0), size=size.small)
+
+// Visualizza pattern
+plotshape(useCandlePatterns and morningStar, title="Morning Star", style=shape.triangleup, location=location.belowbar, 
+         color=color.new(color.lime, 0), size=size.small, text="STAR")
+plotshape(useCandlePatterns and eveningStar, title="Evening Star", style=shape.triangledown, location=location.abovebar, 
+         color=color.new(color.red, 0), size=size.small, text="STAR")
+plotshape(useCandlePatterns and hammerPattern, title="Hammer", style=shape.triangleup, location=location.belowbar, 
+         color=color.new(color.green, 30), size=size.small, text="HAMMER")
+plotshape(useCandlePatterns and shootingStar, title="Shooting Star", style=shape.triangledown, location=location.abovebar, 
+         color=color.new(color.red, 30), size=size.small, text="SHOOT")
+
+// Visualizza divergenze
+plotshape(useMoneyFlow and mfiBullishDiv, title="MFI Bull Div", style=shape.triangleup, location=location.bottom, 
+         color=color.new(color.green, 0), size=size.small)
+plotshape(useMoneyFlow and mfiBearishDiv, title="MFI Bear Div", style=shape.triangledown, location=location.top, 
+         color=color.new(color.red, 0), size=size.small)
+
+// ===== ALERTS =====
+alertcondition(buyCondition, "BUY Signal", "BUY @ {{close}}, SL: {{plot('Buy Stop Loss')}}, TP: {{plot('Buy Take Profit')}}")
+alertcondition(sellCondition, "SELL Signal", "SELL @ {{close}}, SL: {{plot('Sell Stop Loss')}}, TP: {{plot('Sell Take Profit')}}")
+alertcondition(buyCondition and trendUp, "STRONG BUY Signal", "STRONG BUY @ {{close}}")
+alertcondition(sellCondition and trendDown, "STRONG SELL Signal", "STRONG SELL @ {{close}}")
